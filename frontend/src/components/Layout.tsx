@@ -4,7 +4,7 @@ import {
   Upload,
   Box,
   Activity,
-  Github,
+  GitBranch,
 } from 'lucide-react';
 
 const NAV_ITEMS = [
@@ -67,7 +67,7 @@ export default function Layout() {
             rel="noopener noreferrer"
             className="mt-2 flex items-center gap-2 text-xs text-slate-500 hover:text-slate-300 transition-colors"
           >
-            <Github className="h-3 w-3" />
+            <GitBranch className="h-3 w-3" />
             Ajitesh2724/aerorecon
           </a>
         </div>

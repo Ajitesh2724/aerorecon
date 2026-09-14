@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     logs                TEXT NOT NULL DEFAULT '',
     processing_duration_s REAL,
     confidence_summary  TEXT NOT NULL DEFAULT '{}',
-    georef_status       TEXT NOT NULL DEFAULT 'unavailable'
+    georef_status       TEXT NOT NULL DEFAULT 'unavailable',
+    reconstruction_stats TEXT NOT NULL DEFAULT '{}'
 );
 """
 
@@ -49,6 +50,12 @@ async def init_db() -> None:
     _db = await aiosqlite.connect(str(db_path))
     _db.row_factory = aiosqlite.Row
     await _db.execute(CREATE_JOBS_TABLE)
+    try:
+        await _db.execute(
+            "ALTER TABLE jobs ADD COLUMN reconstruction_stats TEXT NOT NULL DEFAULT '{}'"
+        )
+    except Exception:
+        pass  # Column already exists
     await _db.commit()
 
 

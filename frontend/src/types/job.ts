@@ -50,6 +50,7 @@ export interface Job {
   artifacts: Record<string, string>;
   errors: string[];
   processing_duration_s?: number;
+  reconstruction_stats?: Record<string, unknown>;
   confidence_summary: Record<string, unknown>;
   georef_status: string;
 }
