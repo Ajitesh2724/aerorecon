@@ -1,0 +1,176 @@
+@import "tailwindcss";
+
+/* ── AeroRecon Design System ─────────────────────────────────── */
+
+:root {
+  /* Primary palette — deep aerospace blues */
+  --color-primary-50: #eef4ff;
+  --color-primary-100: #d9e7ff;
+  --color-primary-200: #bcd4ff;
+  --color-primary-300: #8ebaff;
+  --color-primary-400: #5994ff;
+  --color-primary-500: #3670ff;
+  --color-primary-600: #1a4ff5;
+  --color-primary-700: #143ce1;
+  --color-primary-800: #1732b6;
+  --color-primary-900: #192f8f;
+  --color-primary-950: #0f1a4f;
+
+  /* Accent — vibrant teal */
+  --color-accent-400: #2dd4bf;
+  --color-accent-500: #14b8a6;
+  --color-accent-600: #0d9488;
+
+  /* Surface — dark mode base */
+  --color-surface-900: #0b0f1a;
+  --color-surface-800: #111827;
+  --color-surface-700: #1a2235;
+  --color-surface-600: #243049;
+  --color-surface-500: #334155;
+
+  /* Status colors */
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-error: #ef4444;
+  --color-info: #3b82f6;
+
+  /* Confidence tiers */
+  --color-conf-high: #22c55e;
+  --color-conf-medium: #f59e0b;
+  --color-conf-low: #ef4444;
+  --color-conf-unseen: #6b7280;
+}
+
+/* ── Global resets ───────────────────────────────────────────── */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background: var(--color-surface-900);
+  color: #e2e8f0;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Scrollbar ───────────────────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-surface-800);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-surface-600);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-surface-500);
+}
+
+/* ── Glassmorphism card ──────────────────────────────────────── */
+
+.glass-card {
+  background: rgba(17, 24, 39, 0.65);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+}
+
+.glass-card-hover {
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+.glass-card-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+/* ── Glow effects ────────────────────────────────────────────── */
+
+.glow-primary {
+  box-shadow: 0 0 20px rgba(54, 112, 255, 0.15),
+              0 0 60px rgba(54, 112, 255, 0.05);
+}
+
+.glow-accent {
+  box-shadow: 0 0 20px rgba(20, 184, 166, 0.15),
+              0 0 60px rgba(20, 184, 166, 0.05);
+}
+
+/* ── Gradient text ───────────────────────────────────────────── */
+
+.gradient-text {
+  background: linear-gradient(135deg, var(--color-primary-400), var(--color-accent-400));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── Progress bar animation ──────────────────────────────────── */
+
+@keyframes progress-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.progress-active {
+  animation: progress-pulse 1.5s ease-in-out infinite;
+}
+
+/* ── Stage pipeline connector ────────────────────────────────── */
+
+@keyframes stage-flow {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+
+.stage-connector-active {
+  background: linear-gradient(
+    90deg,
+    var(--color-primary-700) 0%,
+    var(--color-accent-500) 50%,
+    var(--color-primary-700) 100%
+  );
+  background-size: 200% 100%;
+  animation: stage-flow 2s linear infinite;
+}
+
+/* ── Floating animation ──────────────────────────────────────── */
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+.float-animation {
+  animation: float 3s ease-in-out infinite;
+}
+
+/* ── Upload drop zone ────────────────────────────────────────── */
+
+.drop-zone {
+  border: 2px dashed var(--color-surface-500);
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+.drop-zone:hover,
+.drop-zone.drag-over {
+  border-color: var(--color-primary-500);
+  background: rgba(54, 112, 255, 0.05);
+}

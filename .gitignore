@@ -1,3 +1,17 @@
+# ── AeroRecon project-specific ────────────────────────────────
+data/
+*.ply
+*.pcd
+*.obj
+*.glb
+*.gltf
+*.npy
+*.npz
+frontend/node_modules/
+frontend/dist/
+*.db
+*.sqlite3
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
