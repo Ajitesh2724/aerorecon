@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js';
+import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import {
   Maximize2,
   Minimize2,
@@ -10,6 +11,9 @@ import {
   Eye,
   Sliders,
   Compass,
+  Layers,
+  Box,
+  Palette,
 } from 'lucide-react';
 
 interface CameraPose {
@@ -21,23 +25,38 @@ interface CameraPose {
 }
 
 interface PointCloudViewerProps {
-  plyUrl: string;
+  sparsePlyUrl?: string;
+  densePlyUrl?: string;
+  meshUrl?: string;
   posesUrl?: string;
   title?: string;
   className?: string;
 }
 
+type ViewMode = 'sparse' | 'dense' | 'mesh';
+type ColorMode = 'elevation' | 'rgb' | 'cyan';
+
 export default function PointCloudViewer({
-  plyUrl,
+  sparsePlyUrl,
+  densePlyUrl,
+  meshUrl,
   posesUrl,
-  title = 'Sparse Point Cloud & Trajectory',
+  title = '3D Reconstruction Viewer',
   className = '',
 }: PointCloudViewerProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Active view mode
+  const [viewMode, setViewMode] = useState<ViewMode>(
+    densePlyUrl ? 'dense' : sparsePlyUrl ? 'sparse' : meshUrl ? 'mesh' : 'sparse'
+  );
+  const [colorMode, setColorMode] = useState<ColorMode>('elevation');
+
   const [pointCount, setPointCount] = useState(0);
   const [cameraCount, setCameraCount] = useState(0);
+  const [faceCount, setFaceCount] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   // View settings
@@ -46,13 +65,17 @@ export default function PointCloudViewer({
   const [showTrajectory, setShowTrajectory] = useState(true);
   const [showGrid, setShowGrid] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
+  const [wireframeMesh, setWireframeMesh] = useState(false);
 
   // Scene references
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
+
+  // Objects in scene
   const pointsRef = useRef<THREE.Points | null>(null);
+  const meshRef = useRef<THREE.Group | null>(null);
   const trajectoryGroupRef = useRef<THREE.Group | null>(null);
   const camerasGroupRef = useRef<THREE.Group | null>(null);
   const gridHelperRef = useRef<THREE.GridHelper | null>(null);
@@ -63,16 +86,16 @@ export default function PointCloudViewer({
     if (!container) return;
 
     const width = container.clientWidth;
-    const height = container.clientHeight || 450;
+    const height = container.clientHeight || 480;
 
     // Scene
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0b0f19);
+    scene.background = new THREE.Color(0x0a0e17);
     sceneRef.current = scene;
 
     // Camera
-    const camera = new THREE.PerspectiveCamera(50, width / height, 0.01, 1000);
-    camera.position.set(0, -5, 8);
+    const camera = new THREE.PerspectiveCamera(50, width / height, 0.01, 2000);
+    camera.position.set(0, -10, 15);
     camera.up.set(0, 0, 1); // Z-up for aerial mapping
     cameraRef.current = camera;
 
@@ -91,14 +114,17 @@ export default function PointCloudViewer({
     controlsRef.current = controls;
 
     // Lighting
-    const ambient = new THREE.AmbientLight(0xffffff, 0.8);
+    const ambient = new THREE.AmbientLight(0xffffff, 0.9);
     scene.add(ambient);
-    const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
-    dirLight.position.set(10, 20, 15);
-    scene.add(dirLight);
+    const dirLight1 = new THREE.DirectionalLight(0xffffff, 1.2);
+    dirLight1.position.set(20, -30, 40);
+    scene.add(dirLight1);
+    const dirLight2 = new THREE.DirectionalLight(0x38bdf8, 0.6);
+    dirLight2.position.set(-20, 30, -20);
+    scene.add(dirLight2);
 
-    // Coordinate Grid (XY plane ground)
-    const grid = new THREE.GridHelper(30, 30, 0x38bdf8, 0x1e293b);
+    // Ground Grid
+    const grid = new THREE.GridHelper(40, 40, 0x38bdf8, 0x1e293b);
     grid.rotation.x = Math.PI / 2;
     scene.add(grid);
     gridHelperRef.current = grid;
@@ -121,11 +147,10 @@ export default function PointCloudViewer({
     };
     animate();
 
-    // Resize Handler
     const handleResize = () => {
       if (!container || !renderer || !camera) return;
       const w = container.clientWidth;
-      const h = container.clientHeight || 450;
+      const h = container.clientHeight || 480;
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
@@ -140,68 +165,81 @@ export default function PointCloudViewer({
     };
   }, []);
 
-  // Load PLY point cloud
+  // Determine current active geometry URL
+  const activePlyUrl = viewMode === 'dense' ? (densePlyUrl || sparsePlyUrl) : sparsePlyUrl;
+
+  // Load Point Cloud (Sparse or Dense)
   useEffect(() => {
-    if (!plyUrl || !sceneRef.current) return;
+    if (viewMode === 'mesh') return;
+    if (!activePlyUrl || !sceneRef.current) return;
+
     setLoading(true);
     setError(null);
 
     const loader = new PLYLoader();
     loader.load(
-      plyUrl,
+      activePlyUrl,
       (geometry) => {
         const scene = sceneRef.current;
         if (!scene) return;
 
-        // Remove old points if any
+        // Clean up previous points / mesh
         if (pointsRef.current) {
           scene.remove(pointsRef.current);
           pointsRef.current.geometry.dispose();
+          pointsRef.current = null;
+        }
+        if (meshRef.current) {
+          scene.remove(meshRef.current);
+          meshRef.current = null;
         }
 
         geometry.computeBoundingBox();
         const box = geometry.boundingBox || new THREE.Box3();
-        const center = new THREE.Vector3();
-        box.getCenter(center);
         const size = new THREE.Vector3();
         box.getSize(size);
 
-        // Center geometry
         geometry.center();
 
         const count = geometry.attributes.position.count;
         setPointCount(count);
 
-        // Check if colors exist, otherwise generate elevation gradient
-        if (!geometry.attributes.color) {
-          const positions = geometry.attributes.position.array;
-          const colors = new Float32Array(positions.length);
-          const zMin = -size.z / 2;
-          const zRange = size.z || 1.0;
+        // Compute elevation gradient colors
+        const positions = geometry.attributes.position.array;
+        const countPts = geometry.attributes.position.count;
+        const elevColors = new Float32Array(countPts * 3);
+        const zMin = -size.z / 2;
+        const zRange = size.z || 1.0;
 
-          const colLow = new THREE.Color(0x06b6d4);  // cyan
-          const colMid = new THREE.Color(0x6366f1);  // indigo
-          const colHigh = new THREE.Color(0xf59e0b); // amber
+        const colLow = new THREE.Color(0x06b6d4);   // cyan
+        const colMid = new THREE.Color(0x6366f1);   // indigo
+        const colHigh = new THREE.Color(0xf59e0b);  // amber
 
-          for (let i = 0; i < count; i++) {
-            const z = positions[i * 3 + 2];
-            const t = THREE.MathUtils.clamp((z - zMin) / zRange, 0, 1);
-            const c = new THREE.Color();
-            if (t < 0.5) {
-              c.lerpColors(colLow, colMid, t * 2);
-            } else {
-              c.lerpColors(colMid, colHigh, (t - 0.5) * 2);
-            }
-            colors[i * 3] = c.r;
-            colors[i * 3 + 1] = c.g;
-            colors[i * 3 + 2] = c.b;
+        for (let i = 0; i < countPts; i++) {
+          const z = positions[i * 3 + 2];
+          const t = THREE.MathUtils.clamp((z - zMin) / zRange, 0, 1);
+          const c = new THREE.Color();
+          if (t < 0.5) {
+            c.lerpColors(colLow, colMid, t * 2);
+          } else {
+            c.lerpColors(colMid, colHigh, (t - 0.5) * 2);
           }
-          geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+          elevColors[i * 3] = c.r;
+          elevColors[i * 3 + 1] = c.g;
+          elevColors[i * 3 + 2] = c.b;
+        }
+
+        // Check if file has original RGB
+        if (geometry.attributes.color && colorMode === 'rgb') {
+          // keep original RGB
+        } else if (colorMode === 'elevation' || !geometry.attributes.color) {
+          geometry.setAttribute('color', new THREE.BufferAttribute(elevColors, 3));
         }
 
         const material = new THREE.PointsMaterial({
           size: pointSize,
-          vertexColors: true,
+          vertexColors: colorMode !== 'cyan',
+          color: colorMode === 'cyan' ? 0x38bdf8 : 0xffffff,
           sizeAttenuation: true,
         });
 
@@ -209,10 +247,10 @@ export default function PointCloudViewer({
         scene.add(points);
         pointsRef.current = points;
 
-        // Adjust camera to fit bounding box
-        const maxDim = Math.max(size.x, size.y, size.z, 5);
+        // Auto-center camera
+        const maxDim = Math.max(size.x, size.y, size.z, 6);
         if (cameraRef.current && controlsRef.current) {
-          cameraRef.current.position.set(maxDim * 0.8, -maxDim * 1.2, maxDim * 0.9);
+          cameraRef.current.position.set(maxDim * 0.9, -maxDim * 1.2, maxDim * 0.9);
           cameraRef.current.lookAt(0, 0, 0);
           controlsRef.current.target.set(0, 0, 0);
           controlsRef.current.update();
@@ -223,13 +261,80 @@ export default function PointCloudViewer({
       undefined,
       (err) => {
         console.error('Error loading PLY:', err);
-        setError('Failed to load point cloud. The file may still be generating.');
+        setError('Failed to load point cloud file.');
         setLoading(false);
       }
     );
-  }, [plyUrl]);
+  }, [activePlyUrl, viewMode, colorMode]);
 
-  // Load camera poses and build trajectory + frustums
+  // Load Surface Mesh
+  useEffect(() => {
+    if (viewMode !== 'mesh') return;
+    if (!meshUrl || !sceneRef.current) return;
+
+    setLoading(true);
+    setError(null);
+
+    const loader = new OBJLoader();
+    loader.load(
+      meshUrl,
+      (obj) => {
+        const scene = sceneRef.current;
+        if (!scene) return;
+
+        // Remove old points & mesh
+        if (pointsRef.current) {
+          scene.remove(pointsRef.current);
+          pointsRef.current = null;
+        }
+        if (meshRef.current) {
+          scene.remove(meshRef.current);
+          meshRef.current = null;
+        }
+
+        let totalFaces = 0;
+        obj.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            const m = child as THREE.Mesh;
+            m.geometry.center();
+            m.geometry.computeVertexNormals();
+            if (m.geometry.index) {
+              totalFaces += m.geometry.index.count / 3;
+            }
+
+            m.material = new THREE.MeshStandardMaterial({
+              color: 0x94a3b8,
+              roughness: 0.4,
+              metalness: 0.1,
+              wireframe: wireframeMesh,
+              side: THREE.DoubleSide,
+            });
+          }
+        });
+
+        setFaceCount(Math.round(totalFaces));
+        scene.add(obj);
+        meshRef.current = obj;
+
+        if (cameraRef.current && controlsRef.current) {
+          cameraRef.current.position.set(10, -15, 12);
+          cameraRef.current.lookAt(0, 0, 0);
+          controlsRef.current.target.set(0, 0, 0);
+          controlsRef.current.update();
+        }
+
+        setLoading(false);
+      },
+      undefined,
+      (err) => {
+        console.error('Error loading OBJ:', err);
+        setError('Mesh file is not yet available.');
+        setLoading(false);
+      }
+    );
+  }, [viewMode, meshUrl, wireframeMesh]);
+
+  // Load Camera Trajectory & Frustums
   useEffect(() => {
     if (!posesUrl || !sceneRef.current) return;
 
@@ -246,11 +351,10 @@ export default function PointCloudViewer({
         const camsGroup = camerasGroupRef.current;
         if (!trajGroup || !camsGroup) return;
 
-        // Clear existing
         trajGroup.clear();
         camsGroup.clear();
 
-        // 1. Build trajectory polyline
+        // 1. Trajectory line
         const curvePoints: THREE.Vector3[] = [];
         poses.forEach((p) => {
           if (p.position && p.position.length === 3) {
@@ -266,13 +370,12 @@ export default function PointCloudViewer({
             transparent: true,
             opacity: 0.85,
           });
-          const line = new THREE.Line(lineGeom, lineMat);
-          trajGroup.add(line);
+          trajGroup.add(new THREE.Line(lineGeom, lineMat));
         }
 
-        // 2. Build camera frustums
-        const frustumGeom = new THREE.ConeGeometry(0.18, 0.35, 4);
-        frustumGeom.rotateX(Math.PI / 2); // align forward
+        // 2. Camera frustums
+        const frustumGeom = new THREE.ConeGeometry(0.2, 0.4, 4);
+        frustumGeom.rotateX(Math.PI / 2);
 
         poses.forEach((p, idx) => {
           if (!p.position || p.position.length !== 3) return;
@@ -297,14 +400,10 @@ export default function PointCloudViewer({
             );
             camMesh.rotation.setFromRotationMatrix(m);
           }
-
-          camMesh.userData = p;
           camsGroup.add(camMesh);
         });
       })
-      .catch((err) => {
-        console.warn('Could not load camera poses:', err);
-      });
+      .catch(() => {});
   }, [posesUrl]);
 
   // Update point size
@@ -314,7 +413,7 @@ export default function PointCloudViewer({
     }
   }, [pointSize]);
 
-  // Toggle visibility
+  // Visibility toggles
   useEffect(() => {
     if (camerasGroupRef.current) camerasGroupRef.current.visible = showCameras;
   }, [showCameras]);
@@ -334,13 +433,13 @@ export default function PointCloudViewer({
     if (!camera || !controls) return;
 
     if (type === 'top') {
-      camera.position.set(0, 0, 15);
+      camera.position.set(0, 0, 20);
       camera.up.set(0, 1, 0);
     } else if (type === 'isometric') {
-      camera.position.set(10, -10, 10);
+      camera.position.set(12, -12, 12);
       camera.up.set(0, 0, 1);
     } else if (type === 'side') {
-      camera.position.set(15, 0, 2);
+      camera.position.set(18, 0, 4);
       camera.up.set(0, 0, 1);
     }
     controls.target.set(0, 0, 0);
@@ -360,30 +459,62 @@ export default function PointCloudViewer({
 
   return (
     <div
-      className={`glass-card relative flex flex-col overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0b0f19] ${
-        isFullscreen ? 'fixed inset-0 z-50 rounded-none' : 'h-[520px]'
+      className={`glass-card relative flex flex-col overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0a0e17] ${
+        isFullscreen ? 'fixed inset-0 z-50 rounded-none' : 'h-[540px]'
       } ${className}`}
     >
       {/* Top HUD Header */}
-      <div className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between border-b border-white/[0.08] bg-[#0b0f19]/80 px-4 py-2.5 backdrop-blur-md">
+      <div className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between border-b border-white/[0.08] bg-[#0a0e17]/85 px-4 py-2.5 backdrop-blur-md">
         <div className="flex items-center gap-3">
-          <div className="flex h-2.5 w-2.5 items-center justify-center rounded-full bg-emerald-400">
-            <div className="h-1.5 w-1.5 animate-ping rounded-full bg-emerald-400" />
+          <div className="flex h-2.5 w-2.5 items-center justify-center rounded-full bg-cyan-400">
+            <div className="h-1.5 w-1.5 animate-ping rounded-full bg-cyan-400" />
           </div>
           <span className="text-sm font-semibold tracking-wide text-slate-200">{title}</span>
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            <span className="rounded bg-white/[0.06] px-2 py-0.5 font-mono">
-              {pointCount > 0 ? `${pointCount.toLocaleString()} pts` : '0 pts'}
-            </span>
-            {cameraCount > 0 && (
-              <span className="rounded bg-cyan-500/10 px-2 py-0.5 font-mono text-cyan-300">
-                {cameraCount} poses
-              </span>
+
+          {/* Mode Switcher Tabs */}
+          <div className="flex items-center gap-1 rounded-lg bg-white/[0.05] p-0.5 ml-2">
+            {sparsePlyUrl && (
+              <button
+                onClick={() => setViewMode('sparse')}
+                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition ${
+                  viewMode === 'sparse'
+                    ? 'bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Layers className="h-3 w-3" /> Sparse (SfM)
+              </button>
+            )}
+
+            {densePlyUrl && (
+              <button
+                onClick={() => setViewMode('dense')}
+                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition ${
+                  viewMode === 'dense'
+                    ? 'bg-gradient-to-r from-indigo-500 to-cyan-500 text-white shadow'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Box className="h-3 w-3" /> Dense Cloud
+              </button>
+            )}
+
+            {meshUrl && (
+              <button
+                onClick={() => setViewMode('mesh')}
+                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition ${
+                  viewMode === 'mesh'
+                    ? 'bg-gradient-to-r from-emerald-500 to-teal-600 text-white shadow'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Grid className="h-3 w-3" /> Surface Mesh
+              </button>
             )}
           </div>
         </div>
 
-        {/* View presets & Actions */}
+        {/* View Controls & Action Buttons */}
         <div className="flex items-center gap-1.5">
           <button
             onClick={() => setPresetView('isometric')}
@@ -401,7 +532,7 @@ export default function PointCloudViewer({
           </button>
           <button
             onClick={() => setShowSettings(!showSettings)}
-            title="Display Options"
+            title="Viewer Options"
             className={`rounded-lg p-1.5 transition ${
               showSettings ? 'bg-cyan-500/20 text-cyan-400' : 'text-slate-400 hover:bg-white/[0.08] hover:text-white'
             }`}
@@ -422,29 +553,60 @@ export default function PointCloudViewer({
       {showSettings && (
         <div className="absolute top-12 right-4 z-20 w-64 rounded-xl border border-white/[0.1] bg-[#111827]/95 p-3.5 shadow-2xl backdrop-blur-xl">
           <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
-            Viewer Controls
+            Viewer Settings
           </p>
 
           <div className="space-y-3 text-xs text-slate-300">
-            <div>
-              <div className="flex justify-between py-0.5">
-                <span>Point Size</span>
-                <span className="font-mono text-cyan-400">{pointSize}px</span>
+            {viewMode !== 'mesh' && (
+              <>
+                <div>
+                  <div className="flex justify-between py-0.5">
+                    <span>Point Size</span>
+                    <span className="font-mono text-cyan-400">{pointSize}px</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="1"
+                    max="8"
+                    step="0.5"
+                    value={pointSize}
+                    onChange={(e) => setPointSize(parseFloat(e.target.value))}
+                    className="w-full accent-cyan-400"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between border-t border-white/[0.06] pt-2">
+                  <span className="flex items-center gap-1.5">
+                    <Palette className="h-3.5 w-3.5 text-cyan-400" /> Color Mode
+                  </span>
+                  <select
+                    value={colorMode}
+                    onChange={(e) => setColorMode(e.target.value as ColorMode)}
+                    className="rounded bg-black/40 px-2 py-0.5 text-xs text-slate-300 border border-white/[0.1]"
+                  >
+                    <option value="elevation">Elevation Ramp</option>
+                    <option value="rgb">True Color (RGB)</option>
+                    <option value="cyan">Tactical Cyan</option>
+                  </select>
+                </div>
+              </>
+            )}
+
+            {viewMode === 'mesh' && (
+              <div className="flex items-center justify-between border-t border-white/[0.06] pt-2">
+                <span>Wireframe Mode</span>
+                <input
+                  type="checkbox"
+                  checked={wireframeMesh}
+                  onChange={(e) => setWireframeMesh(e.target.checked)}
+                  className="rounded accent-cyan-400"
+                />
               </div>
-              <input
-                type="range"
-                min="1"
-                max="8"
-                step="0.5"
-                value={pointSize}
-                onChange={(e) => setPointSize(parseFloat(e.target.value))}
-                className="w-full accent-cyan-400"
-              />
-            </div>
+            )}
 
             <div className="flex items-center justify-between border-t border-white/[0.06] pt-2">
               <span className="flex items-center gap-1.5">
-                <Camera className="h-3.5 w-3.5 text-cyan-400" /> Cameras
+                <Camera className="h-3.5 w-3.5 text-cyan-400" /> Camera Frustums
               </span>
               <input
                 type="checkbox"
@@ -456,7 +618,7 @@ export default function PointCloudViewer({
 
             <div className="flex items-center justify-between">
               <span className="flex items-center gap-1.5">
-                <Eye className="h-3.5 w-3.5 text-cyan-400" /> Drone Trajectory
+                <Eye className="h-3.5 w-3.5 text-cyan-400" /> Flight Trajectory
               </span>
               <input
                 type="checkbox"
@@ -468,7 +630,7 @@ export default function PointCloudViewer({
 
             <div className="flex items-center justify-between">
               <span className="flex items-center gap-1.5">
-                <Grid className="h-3.5 w-3.5 text-cyan-400" /> Ground Grid
+                <Grid className="h-3.5 w-3.5 text-cyan-400" /> Ground Plane
               </span>
               <input
                 type="checkbox"
@@ -484,30 +646,40 @@ export default function PointCloudViewer({
       {/* Main 3D Canvas Mount */}
       <div ref={mountRef} className="h-full w-full cursor-grab active:cursor-grabbing" />
 
-      {/* Loading overlay */}
+      {/* Loading Overlay */}
       {loading && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0b0f19]/80 backdrop-blur-sm">
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0a0e17]/85 backdrop-blur-sm">
           <div className="h-10 w-10 animate-spin rounded-full border-2 border-cyan-400 border-t-transparent" />
-          <p className="mt-3 text-sm font-medium text-slate-300">Loading 3D Point Cloud…</p>
+          <p className="mt-3 text-sm font-medium text-slate-300">
+            {viewMode === 'mesh' ? 'Triangulating 3D Mesh…' : 'Loading 3D Point Cloud…'}
+          </p>
         </div>
       )}
 
       {/* Error state */}
       {error && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center bg-[#0b0f19]/90">
+        <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center bg-[#0a0e17]/90">
           <p className="text-sm font-medium text-amber-400">{error}</p>
-          <p className="mt-1 text-xs text-slate-500">
-            Ensure the reconstruction SfM stage has finished.
-          </p>
         </div>
       )}
 
-      {/* Bottom status bar */}
-      <div className="absolute bottom-2 left-3 right-3 z-10 flex items-center justify-between rounded-lg bg-black/40 px-3 py-1.5 text-[11px] text-slate-400 backdrop-blur-sm pointer-events-none">
-        <div>
+      {/* Bottom Status Bar */}
+      <div className="absolute bottom-2 left-3 right-3 z-10 flex items-center justify-between rounded-lg bg-black/50 px-3 py-1.5 text-[11px] text-slate-400 backdrop-blur-sm pointer-events-none">
+        <div className="flex items-center gap-3">
           <span>Drag to rotate · Right-click/Shift+drag to pan · Scroll to zoom</span>
+          {pointCount > 0 && viewMode !== 'mesh' && (
+            <span className="font-mono text-cyan-300">{pointCount.toLocaleString()} points</span>
+          )}
+          {faceCount > 0 && viewMode === 'mesh' && (
+            <span className="font-mono text-emerald-300">{faceCount.toLocaleString()} triangles</span>
+          )}
+          {cameraCount > 0 && (
+            <span className="font-mono text-indigo-300">{cameraCount} camera views</span>
+          )}
         </div>
-        <div className="font-mono text-cyan-400">Z-UP | Elevation Colormap</div>
+        <div className="font-mono text-cyan-400">
+          {viewMode === 'mesh' ? '3D SURFACE TIN MESH' : colorMode === 'elevation' ? 'Z-UP ELEVATION RAMP' : 'TRUE RGB'}
+        </div>
       </div>
     </div>
   );

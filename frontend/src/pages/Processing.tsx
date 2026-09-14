@@ -240,11 +240,11 @@ export default function Processing() {
       )}
 
       {/* 3D Reconstruction Viewer */}
-      {job.artifacts?.sparse_ply && (
+      {(job.artifacts?.sparse_ply || job.artifacts?.dense_ply) && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-400">
-              3D Reconstruction (Sparse Point Cloud & Camera Poses)
+              3D Reconstruction (Sparse SfM, Dense Fusion & Surface Mesh)
             </h3>
             {Boolean(job.reconstruction_stats?.sfm) && (
               <span className="rounded-md bg-cyan-500/10 px-2.5 py-1 text-xs font-mono text-cyan-300">
@@ -254,33 +254,39 @@ export default function Processing() {
           </div>
 
           {/* Quick Metrics Bar */}
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-4 gap-3">
             <div className="glass-card p-4">
-              <p className="text-xs text-slate-500">Sparse 3D Points</p>
+              <p className="text-xs text-slate-500">Sparse Points</p>
               <p className="text-xl font-bold text-slate-100 mt-1">
                 {Number(job.reconstruction_stats?.sparse_points || 0).toLocaleString()}
               </p>
             </div>
             <div className="glass-card p-4">
-              <p className="text-xs text-slate-500">Registered Views</p>
-              <p className="text-xl font-bold text-cyan-400 mt-1">
-                {Number(job.reconstruction_stats?.registered_images || 0)}
+              <p className="text-xs text-slate-500">Dense 3D Points</p>
+              <p className="text-xl font-bold text-indigo-400 mt-1">
+                {Number(job.reconstruction_stats?.dense_points || 0).toLocaleString()}
               </p>
             </div>
             <div className="glass-card p-4">
-              <p className="text-xs text-slate-500">Reprojection Error</p>
+              <p className="text-xs text-slate-500">3D Gaussians</p>
+              <p className="text-xl font-bold text-cyan-400 mt-1">
+                {Number(job.reconstruction_stats?.num_gaussians || 0).toLocaleString()}
+              </p>
+            </div>
+            <div className="glass-card p-4">
+              <p className="text-xs text-slate-500">Mesh Triangles</p>
               <p className="text-xl font-bold text-emerald-400 mt-1">
-                {(job.reconstruction_stats?.sfm as Record<string, unknown> | undefined)?.mean_reprojection_error != null
-                  ? `${String((job.reconstruction_stats?.sfm as Record<string, unknown>).mean_reprojection_error)} px`
-                  : 'N/A'}
+                {Number(job.reconstruction_stats?.face_count || 0).toLocaleString()}
               </p>
             </div>
           </div>
 
           <PointCloudViewer
-            plyUrl={api.artifactUrl(job.id, 'sparse_ply')}
+            sparsePlyUrl={job.artifacts.sparse_ply ? api.artifactUrl(job.id, 'sparse_ply') : undefined}
+            densePlyUrl={job.artifacts.dense_ply ? api.artifactUrl(job.id, 'dense_ply') : undefined}
+            meshUrl={job.artifacts.mesh_obj ? api.artifactUrl(job.id, 'mesh_obj') : undefined}
             posesUrl={job.artifacts.poses_json ? api.artifactUrl(job.id, 'poses_json') : undefined}
-            title={`${job.name} — Sparse Geometry & Camera Trajectory`}
+            title={`${job.name} — 3D Reconstruction & Trajectory`}
           />
         </div>
       )}
