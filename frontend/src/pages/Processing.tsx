@@ -286,17 +286,118 @@ export default function Processing() {
             densePlyUrl={job.artifacts.dense_ply ? api.artifactUrl(job.id, 'dense_ply') : undefined}
             meshUrl={job.artifacts.mesh_obj ? api.artifactUrl(job.id, 'mesh_obj') : undefined}
             posesUrl={job.artifacts.poses_json ? api.artifactUrl(job.id, 'poses_json') : undefined}
+            scaleFactor={(job.reconstruction_stats?.scale_factor as number) || 1.0}
             title={`${job.name} — 3D Reconstruction & Trajectory`}
           />
         </div>
       )}
 
+      {/* Quality & Confidence Audit Card */}
+      {Boolean(job.confidence_summary && Object.keys(job.confidence_summary).length > 0) && (
+        <div className="glass-card p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <Shield className="h-5 w-5 text-emerald-400" />
+              <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
+                Reconstruction Confidence & Metric Quality Audit
+              </h3>
+            </div>
+            <span
+              className={`rounded-full px-3 py-1 text-xs font-bold uppercase tracking-wider ${
+                job.confidence_summary.overall_tier === 'high'
+                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                  : job.confidence_summary.overall_tier === 'medium'
+                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                  : 'bg-red-500/20 text-red-400 border border-red-500/30'
+              }`}
+            >
+              Tier: {String(job.confidence_summary.overall_tier || 'Medium')}
+            </span>
+          </div>
+
+          {/* Stacked distribution bar */}
+          {Boolean(job.confidence_summary.distribution) && (
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-xs text-slate-400">
+                <span>Confidence Distribution</span>
+                <span>
+                  High: {String((job.confidence_summary.distribution as Record<string, unknown>).high ?? 0)}% · Med: {String((job.confidence_summary.distribution as Record<string, unknown>).medium ?? 0)}% · Low: {String((job.confidence_summary.distribution as Record<string, unknown>).low ?? 0)}%
+                </span>
+              </div>
+              <div className="h-3 w-full rounded-full bg-slate-800 overflow-hidden flex">
+                <div
+                  style={{ width: `${Number((job.confidence_summary.distribution as Record<string, unknown>).high || 0)}%` }}
+                  className="bg-emerald-500 h-full transition-all"
+                  title="High Confidence"
+                />
+                <div
+                  style={{ width: `${Number((job.confidence_summary.distribution as Record<string, unknown>).medium || 0)}%` }}
+                  className="bg-amber-500 h-full transition-all"
+                  title="Medium Confidence"
+                />
+                <div
+                  style={{ width: `${Number((job.confidence_summary.distribution as Record<string, unknown>).low || 0)}%` }}
+                  className="bg-red-500 h-full transition-all"
+                  title="Low Confidence"
+                />
+                <div
+                  style={{ width: `${Number((job.confidence_summary.distribution as Record<string, unknown>).unseen || 0)}%` }}
+                  className="bg-slate-700 h-full transition-all"
+                  title="Occluded / Unseen"
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Factors Breakdown */}
+          {Boolean(job.confidence_summary.factors) && (
+            <div className="grid grid-cols-4 gap-3 pt-2">
+              <div className="rounded-xl bg-white/[0.03] p-3 text-xs border border-white/[0.04]">
+                <p className="text-slate-500">View Redundancy</p>
+                <p className="text-base font-semibold text-slate-200 mt-0.5">
+                  {Math.round(Number((job.confidence_summary.factors as Record<string, unknown>).view_redundancy || 0) * 100)}%
+                </p>
+              </div>
+              <div className="rounded-xl bg-white/[0.03] p-3 text-xs border border-white/[0.04]">
+                <p className="text-slate-500">Reprojection Precision</p>
+                <p className="text-base font-semibold text-cyan-400 mt-0.5">
+                  {Math.round(Number((job.confidence_summary.factors as Record<string, unknown>).reprojection_precision || 0) * 100)}%
+                </p>
+              </div>
+              <div className="rounded-xl bg-white/[0.03] p-3 text-xs border border-white/[0.04]">
+                <p className="text-slate-500">Motion Consistency</p>
+                <p className="text-base font-semibold text-indigo-400 mt-0.5">
+                  {Math.round(Number((job.confidence_summary.factors as Record<string, unknown>).flow_consistency || 0) * 100)}%
+                </p>
+              </div>
+              <div className="rounded-xl bg-white/[0.03] p-3 text-xs border border-white/[0.04]">
+                <p className="text-slate-500">Georeference Quality</p>
+                <p className="text-base font-semibold text-emerald-400 mt-0.5">
+                  {job.georef_status === 'aligned' ? '100% (GPS)' : 'Nominal (Default)'}
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Artifacts / Downloads */}
       {Object.keys(job.artifacts).length > 0 && (
-        <div className="glass-card p-6">
-          <h3 className="mb-3 text-sm font-semibold uppercase tracking-wider text-slate-400">
-            Output Artifacts
-          </h3>
+        <div className="glass-card p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-400">
+              Output Artifacts & Deliverables
+            </h3>
+            {job.artifacts.export_package && (
+              <a
+                href={api.artifactUrl(job.id, 'export_package')}
+                className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-4 py-2 text-xs font-bold text-white shadow-lg transition hover:scale-[1.02] active:scale-[0.98]"
+              >
+                <Download className="h-4 w-4" /> Download Complete Package (.ZIP)
+              </a>
+            )}
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             {Object.entries(job.artifacts).map(([name, _path]) => (
               <a
@@ -305,7 +406,7 @@ export default function Processing() {
                 className="flex items-center gap-3 rounded-xl border border-white/[0.06] bg-[var(--color-surface-700)] px-4 py-3 text-sm text-slate-300 transition-all hover:border-[var(--color-primary-500)]/30 hover:bg-[var(--color-surface-600)]"
               >
                 <Download className="h-4 w-4 text-[var(--color-primary-400)]" />
-                {name}
+                <span className="capitalize">{name.replace(/_/g, ' ')}</span>
               </a>
             ))}
           </div>

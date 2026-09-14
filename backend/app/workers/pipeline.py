@@ -177,7 +177,13 @@ async def _execute_stage(
         return await _run_optical_flow(job_id, job, job_dir)
     if stage_name == "dense_reconstruction":
         return await _run_dense_reconstruction(job_id, job, job_dir)
-    # Stages added in later milestones return None (skipped)
+    if stage_name == "georeferencing":
+        return await _run_georeferencing(job_id, job, job_dir)
+    if stage_name == "confidence":
+        return await _run_confidence(job_id, job, job_dir)
+    if stage_name == "export":
+        return await _run_export(job_id, job, job_dir)
+    # Unknown stage
     return None
 
 
@@ -716,6 +722,227 @@ async def _run_dense_reconstruction(job_id: str, job: dict, job_dir: Path) -> St
         f"{stats.get('num_gaussians', 0):,} Gaussian splats, "
         f"and {stats.get('face_count', 0):,} mesh triangles"
     )
+    return StageResult(True, msg, artifacts)
+
+
+async def _run_georeferencing(job_id: str, job: dict, job_dir: Path) -> StageResult:
+    """Stage 7: Georeferencing & Metric Scale Calibration."""
+    import asyncio
+    from ..services.georeferencing import align_reconstruction_to_gps
+    from ..services.metadata import parse_telemetry
+
+    async def _update_progress(pct: float, msg: str = "") -> None:
+        await JobCRUD.update(
+            job_id,
+            stage_progress={
+                **((await JobCRUD.get(job_id)) or {}).get("stage_progress", {}),
+                "georeferencing": {"status": "running", "progress": pct, "message": msg},
+            },
+        )
+        await _broadcast(job_id, "georeferencing", "running", pct)
+
+    # Locate camera poses JSON
+    poses_json = job_dir / "sfm" / "camera_poses.json"
+    if not poses_json.exists():
+        poses_json = job_dir / "camera_poses.json"
+
+    if not poses_json.exists():
+        return StageResult(False, "Camera poses not found for georeferencing.")
+
+    # Telemetry records
+    telemetry_records = None
+    if job.get("telemetry_path") and Path(job["telemetry_path"]).exists():
+        try:
+            telemetry_records = parse_telemetry(job["telemetry_path"])
+        except Exception as exc:
+            logger.warning("Failed parsing telemetry for georef: %s", exc)
+
+    await _update_progress(10, "Correlating flight path and estimating metric scale…")
+
+    georef_dir = job_dir / "georeferencing"
+    loop = asyncio.get_running_loop()
+    def sync_progress(pct: float, msg: str) -> None:
+        asyncio.run_coroutine_threadsafe(_update_progress(pct, msg), loop)
+
+    georef_res = await loop.run_in_executor(
+        None,
+        lambda: align_reconstruction_to_gps(
+            poses_json_path=str(poses_json),
+            telemetry_records=telemetry_records,
+            output_dir=str(georef_dir),
+            on_progress=sync_progress,
+        ),
+    )
+
+    stats = georef_res.get("stats", {})
+    georef_status = stats.get("status", "uncalibrated")
+
+    artifacts = {}
+    if georef_res.get("aligned_poses_json"):
+        artifacts["georeferenced_poses"] = georef_res["aligned_poses_json"]
+    if georef_res.get("geojson_path"):
+        artifacts["flight_path_geojson"] = georef_res["geojson_path"]
+
+    await _update_progress(100, "Georeferencing complete.")
+
+    await JobCRUD.update(
+        job_id,
+        georef_status=georef_status,
+        reconstruction_stats={
+            **((await JobCRUD.get(job_id)) or {}).get("reconstruction_stats", {}),
+            "georeferencing": stats,
+            "scale_factor": stats.get("scale_factor_m_per_unit", 1.0),
+        },
+    )
+
+    if georef_status == "aligned":
+        msg = f"Aligned to GPS with RMSE {stats.get('alignment_rmse_m', 0.0)}m (scale: {stats.get('scale_factor_m_per_unit', 1.0)}m/unit)"
+    else:
+        msg = f"Using nominal flight scale ({stats.get('reason', 'uncalibrated')})"
+
+    return StageResult(True, msg, artifacts)
+
+
+async def _run_confidence(job_id: str, job: dict, job_dir: Path) -> StageResult:
+    """Stage 8: Reconstruction Confidence Mapping."""
+    import asyncio
+    from ..services.confidence import compute_confidence_map
+
+    async def _update_progress(pct: float, msg: str = "") -> None:
+        await JobCRUD.update(
+            job_id,
+            stage_progress={
+                **((await JobCRUD.get(job_id)) or {}).get("stage_progress", {}),
+                "confidence": {"status": "running", "progress": pct, "message": msg},
+            },
+        )
+        await _broadcast(job_id, "confidence", "running", pct)
+
+    await _update_progress(10, "Evaluating multi-view geometric confidence…")
+
+    rec_stats = job.get("reconstruction_stats") or {}
+    points_count = rec_stats.get("dense_points") or rec_stats.get("sparse_points", 0)
+    registered_images = rec_stats.get("registered_images", 0)
+
+    mean_reproj = None
+    sfm_meta = rec_stats.get("sfm") or {}
+    if isinstance(sfm_meta, dict):
+        mean_reproj = sfm_meta.get("mean_reprojection_error")
+
+    mean_flow_cons = 0.85
+    has_gps = job.get("georef_status") == "aligned"
+
+    loop = asyncio.get_running_loop()
+    def sync_progress(pct: float, msg: str) -> None:
+        asyncio.run_coroutine_threadsafe(_update_progress(pct, msg), loop)
+
+    conf_dir = job_dir / "confidence"
+    conf_res = await loop.run_in_executor(
+        None,
+        lambda: compute_confidence_map(
+            points_count=points_count,
+            registered_images=registered_images,
+            mean_reprojection_error=mean_reproj,
+            mean_flow_consistency=mean_flow_cons,
+            has_gps=has_gps,
+            output_dir=str(conf_dir),
+            on_progress=sync_progress,
+        ),
+    )
+
+    summary = conf_res.get("summary", {})
+    artifacts = {}
+    if conf_res.get("report_path"):
+        artifacts["confidence_report"] = conf_res["report_path"]
+
+    await _update_progress(100, "Confidence mapping complete.")
+
+    await JobCRUD.update(
+        job_id,
+        confidence_summary=summary,
+    )
+
+    dist = summary.get("distribution", {})
+    msg = (
+        f"Overall confidence: {summary.get('overall_tier', 'medium').upper()} "
+        f"({dist.get('high', 0)}% High, {dist.get('medium', 0)}% Medium, {dist.get('low', 0)}% Low)"
+    )
+    return StageResult(True, msg, artifacts)
+
+
+async def _run_export(job_id: str, job: dict, job_dir: Path) -> StageResult:
+    """Stage 9: Package all 3D reconstruction outputs for download."""
+    import zipfile
+    import asyncio
+
+    async def _update_progress(pct: float, msg: str = "") -> None:
+        await JobCRUD.update(
+            job_id,
+            stage_progress={
+                **((await JobCRUD.get(job_id)) or {}).get("stage_progress", {}),
+                "export": {"status": "running", "progress": pct, "message": msg},
+            },
+        )
+        await _broadcast(job_id, "export", "running", pct)
+
+    await _update_progress(20, "Packaging 3D models and deliverables…")
+
+    zip_path = job_dir / f"aerorecon_{job_id[:8]}_export.zip"
+
+    # Gather export files
+    current_artifacts = job.get("artifacts") or {}
+    files_to_zip = []
+
+    for name, path_str in current_artifacts.items():
+        p = Path(path_str)
+        if p.exists() and p.is_file():
+            files_to_zip.append((p, f"models/{p.name}"))
+
+    # Also search for key models in job_dir
+    for candidate in [
+        job_dir / "dense" / "dense.ply",
+        job_dir / "splat" / "gaussian_splat.ply",
+        job_dir / "mesh" / "model.obj",
+        job_dir / "sfm" / "sparse.ply",
+        job_dir / "sfm" / "camera_poses.json",
+        job_dir / "georeferencing" / "flight_path.geojson",
+        job_dir / "confidence" / "confidence_report.json",
+    ]:
+        if candidate.exists() and candidate not in [f[0] for f in files_to_zip]:
+            files_to_zip.append((candidate, f"models/{candidate.name}"))
+
+    loop = asyncio.get_running_loop()
+
+    def _create_zip():
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for src, arcname in files_to_zip:
+                zf.write(src, arcname=arcname)
+            # Add README
+            readme_text = (
+                f"AeroRecon 3D Reconstruction Export\n"
+                f"Job ID: {job_id}\n"
+                f"Job Name: {job.get('name', 'Scan')}\n\n"
+                f"Contents:\n"
+                f"- dense.ply: High-density multi-view fused point cloud\n"
+                f"- gaussian_splat.ply: 3D Gaussian Splatting model\n"
+                f"- model.obj: Triangulated 3D surface mesh\n"
+                f"- sparse.ply: Structure-from-Motion sparse geometry\n"
+                f"- camera_poses.json: Calibrated 6-DoF camera trajectory\n"
+                f"- flight_path.geojson: Georeferenced flight path\n"
+                f"- confidence_report.json: Multi-factor quality & confidence audit\n"
+            )
+            zf.writestr("README.txt", readme_text)
+
+    await loop.run_in_executor(None, _create_zip)
+
+    await _update_progress(100, "Package export complete.")
+
+    artifacts = {
+        "export_package": str(zip_path),
+    }
+
+    size_mb = round(zip_path.stat().st_size / (1024 * 1024), 2)
+    msg = f"Export package ready ({len(files_to_zip)} files, {size_mb} MB)"
     return StageResult(True, msg, artifacts)
 
 

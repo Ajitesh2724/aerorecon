@@ -14,6 +14,8 @@ import {
   Layers,
   Box,
   Palette,
+  Ruler,
+  X,
 } from 'lucide-react';
 
 interface CameraPose {
@@ -29,6 +31,7 @@ interface PointCloudViewerProps {
   densePlyUrl?: string;
   meshUrl?: string;
   posesUrl?: string;
+  scaleFactor?: number;
   title?: string;
   className?: string;
 }
@@ -41,6 +44,7 @@ export default function PointCloudViewer({
   densePlyUrl,
   meshUrl,
   posesUrl,
+  scaleFactor = 1.0,
   title = '3D Reconstruction Viewer',
   className = '',
 }: PointCloudViewerProps) {
@@ -67,6 +71,19 @@ export default function PointCloudViewer({
   const [showSettings, setShowSettings] = useState(false);
   const [wireframeMesh, setWireframeMesh] = useState(false);
 
+  // Measurement Tool
+  const [isMeasuring, setIsMeasuring] = useState(false);
+  const [measureUnit, setMeasureUnit] = useState<'m' | 'ft'>('m');
+  const [measureResult, setMeasureResult] = useState<{
+    dist3D: number;
+    distHoriz: number;
+    heightDiff: number;
+  } | null>(null);
+
+  const measurePointsRef = useRef<THREE.Vector3[]>([]);
+  const isMeasuringRef = useRef(false);
+  isMeasuringRef.current = isMeasuring;
+
   // Scene references
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -79,6 +96,7 @@ export default function PointCloudViewer({
   const trajectoryGroupRef = useRef<THREE.Group | null>(null);
   const camerasGroupRef = useRef<THREE.Group | null>(null);
   const gridHelperRef = useRef<THREE.GridHelper | null>(null);
+  const measureGroupRef = useRef<THREE.Group | null>(null);
 
   // Initialize Three.js scene
   useEffect(() => {
@@ -138,6 +156,88 @@ export default function PointCloudViewer({
     scene.add(camsGroup);
     camerasGroupRef.current = camsGroup;
 
+    const mGroup = new THREE.Group();
+    scene.add(mGroup);
+    measureGroupRef.current = mGroup;
+
+    // Canvas click listener for measurement
+    const handleCanvasClick = (e: MouseEvent) => {
+      if (!isMeasuringRef.current || !cameraRef.current || !rendererRef.current) return;
+
+      const rect = rendererRef.current.domElement.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1
+      );
+
+      const raycaster = new THREE.Raycaster();
+      raycaster.params.Points = { threshold: 0.35 };
+      raycaster.setFromCamera(mouse, cameraRef.current);
+
+      let targetPoint: THREE.Vector3 | null = null;
+
+      if (pointsRef.current) {
+        const hits = raycaster.intersectObject(pointsRef.current, false);
+        if (hits.length > 0) {
+          targetPoint = hits[0].point;
+        }
+      }
+      if (!targetPoint && meshRef.current) {
+        const hits = raycaster.intersectObjects(meshRef.current.children, true);
+        if (hits.length > 0) {
+          targetPoint = hits[0].point;
+        }
+      }
+      if (!targetPoint) {
+        const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+        targetPoint = new THREE.Vector3();
+        raycaster.ray.intersectPlane(plane, targetPoint);
+      }
+
+      if (!targetPoint) return;
+
+      const group = measureGroupRef.current;
+      if (!group) return;
+
+      if (measurePointsRef.current.length >= 2) {
+        measurePointsRef.current = [];
+        group.clear();
+        setMeasureResult(null);
+      }
+
+      measurePointsRef.current.push(targetPoint.clone());
+
+      // Add point sphere
+      const sphereGeom = new THREE.SphereGeometry(0.12, 16, 16);
+      const sphereMat = new THREE.MeshBasicMaterial({ color: 0xf59e0b });
+      const sphere = new THREE.Mesh(sphereGeom, sphereMat);
+      sphere.position.copy(targetPoint);
+      group.add(sphere);
+
+      if (measurePointsRef.current.length === 2) {
+        const p1 = measurePointsRef.current[0];
+        const p2 = measurePointsRef.current[1];
+
+        // Add connecting line
+        const lineGeom = new THREE.BufferGeometry().setFromPoints([p1, p2]);
+        const lineMat = new THREE.LineBasicMaterial({ color: 0xf59e0b, linewidth: 2 });
+        group.add(new THREE.Line(lineGeom, lineMat));
+
+        const s = scaleFactor || 1.0;
+        const d3 = p1.distanceTo(p2) * s;
+        const dh = Math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2) * s;
+        const dz = Math.abs(p2.z - p1.z) * s;
+
+        setMeasureResult({
+          dist3D: d3,
+          distHoriz: dh,
+          heightDiff: dz,
+        });
+      }
+    };
+
+    renderer.domElement.addEventListener('click', handleCanvasClick);
+
     // Animation Loop
     let animId: number;
     const animate = () => {
@@ -160,10 +260,30 @@ export default function PointCloudViewer({
     return () => {
       cancelAnimationFrame(animId);
       window.removeEventListener('resize', handleResize);
+      renderer.domElement.removeEventListener('click', handleCanvasClick);
       renderer.dispose();
       container.innerHTML = '';
     };
-  }, []);
+  }, [scaleFactor]);
+
+  // Clear measurements
+  const clearMeasurement = () => {
+    measurePointsRef.current = [];
+    if (measureGroupRef.current) {
+      measureGroupRef.current.clear();
+    }
+    setMeasureResult(null);
+  };
+
+  const toggleMeasuring = () => {
+    if (isMeasuring) {
+      clearMeasurement();
+      setIsMeasuring(false);
+    } else {
+      clearMeasurement();
+      setIsMeasuring(true);
+    }
+  };
 
   // Determine current active geometry URL
   const activePlyUrl = viewMode === 'dense' ? (densePlyUrl || sparsePlyUrl) : sparsePlyUrl;
@@ -183,7 +303,6 @@ export default function PointCloudViewer({
         const scene = sceneRef.current;
         if (!scene) return;
 
-        // Clean up previous points / mesh
         if (pointsRef.current) {
           scene.remove(pointsRef.current);
           pointsRef.current.geometry.dispose();
@@ -229,7 +348,6 @@ export default function PointCloudViewer({
           elevColors[i * 3 + 2] = c.b;
         }
 
-        // Check if file has original RGB
         if (geometry.attributes.color && colorMode === 'rgb') {
           // keep original RGB
         } else if (colorMode === 'elevation' || !geometry.attributes.color) {
@@ -247,7 +365,6 @@ export default function PointCloudViewer({
         scene.add(points);
         pointsRef.current = points;
 
-        // Auto-center camera
         const maxDim = Math.max(size.x, size.y, size.z, 6);
         if (cameraRef.current && controlsRef.current) {
           cameraRef.current.position.set(maxDim * 0.9, -maxDim * 1.2, maxDim * 0.9);
@@ -282,7 +399,6 @@ export default function PointCloudViewer({
         const scene = sceneRef.current;
         if (!scene) return;
 
-        // Remove old points & mesh
         if (pointsRef.current) {
           scene.remove(pointsRef.current);
           pointsRef.current = null;
@@ -354,7 +470,6 @@ export default function PointCloudViewer({
         trajGroup.clear();
         camsGroup.clear();
 
-        // 1. Trajectory line
         const curvePoints: THREE.Vector3[] = [];
         poses.forEach((p) => {
           if (p.position && p.position.length === 3) {
@@ -373,7 +488,6 @@ export default function PointCloudViewer({
           trajGroup.add(new THREE.Line(lineGeom, lineMat));
         }
 
-        // 2. Camera frustums
         const frustumGeom = new THREE.ConeGeometry(0.2, 0.4, 4);
         frustumGeom.rotateX(Math.PI / 2);
 
@@ -426,7 +540,6 @@ export default function PointCloudViewer({
     if (gridHelperRef.current) gridHelperRef.current.visible = showGrid;
   }, [showGrid]);
 
-  // Preset view angles
   const setPresetView = useCallback((type: 'top' | 'isometric' | 'side') => {
     const camera = cameraRef.current;
     const controls = controlsRef.current;
@@ -455,6 +568,13 @@ export default function PointCloudViewer({
       document.exitFullscreen();
       setIsFullscreen(false);
     }
+  };
+
+  const convertUnit = (meters: number) => {
+    if (measureUnit === 'ft') {
+      return `${(meters * 3.28084).toFixed(2)} ft`;
+    }
+    return `${meters.toFixed(2)} m`;
   };
 
   return (
@@ -516,6 +636,20 @@ export default function PointCloudViewer({
 
         {/* View Controls & Action Buttons */}
         <div className="flex items-center gap-1.5">
+          {/* Measurement Button */}
+          <button
+            onClick={toggleMeasuring}
+            title={isMeasuring ? 'Exit Measurement Tool' : '3D Distance Measurement Tool'}
+            className={`flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-medium transition ${
+              isMeasuring
+                ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
+                : 'text-slate-400 hover:bg-white/[0.08] hover:text-white'
+            }`}
+          >
+            <Ruler className="h-3.5 w-3.5" />
+            {isMeasuring ? 'Measuring…' : 'Measure'}
+          </button>
+
           <button
             onClick={() => setPresetView('isometric')}
             title="Isometric View"
@@ -548,6 +682,63 @@ export default function PointCloudViewer({
           </button>
         </div>
       </div>
+
+      {/* Measurement HUD Flyout */}
+      {isMeasuring && (
+        <div className="absolute top-12 left-4 z-20 w-72 rounded-xl border border-amber-500/30 bg-[#111827]/95 p-3.5 shadow-2xl backdrop-blur-xl">
+          <div className="flex items-center justify-between border-b border-white/[0.08] pb-2 mb-2">
+            <span className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-amber-400">
+              <Ruler className="h-3.5 w-3.5" /> 3D Metric Measurement
+            </span>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setMeasureUnit(measureUnit === 'm' ? 'ft' : 'm')}
+                className="rounded bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-mono text-cyan-300 hover:bg-white/[0.12]"
+              >
+                {measureUnit.toUpperCase()}
+              </button>
+              <button
+                onClick={toggleMeasuring}
+                className="rounded p-0.5 text-slate-400 hover:text-white"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+
+          <p className="text-[11px] text-slate-400 mb-2">
+            Click two points in the 3D scene to calculate real-world metric distance.
+          </p>
+
+          {measureResult ? (
+            <div className="space-y-1.5 rounded-lg bg-black/40 p-2.5 text-xs font-mono">
+              <div className="flex justify-between">
+                <span className="text-slate-400">3D Distance:</span>
+                <span className="font-bold text-amber-400">{convertUnit(measureResult.dist3D)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Horizontal (Δxy):</span>
+                <span className="text-cyan-300">{convertUnit(measureResult.distHoriz)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Height Diff (Δz):</span>
+                <span className="text-emerald-300">{convertUnit(measureResult.heightDiff)}</span>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-lg bg-black/30 p-2 text-center text-xs text-slate-500 italic">
+              Click 1st point to start…
+            </div>
+          )}
+
+          <button
+            onClick={clearMeasurement}
+            className="mt-2.5 w-full rounded-md bg-white/[0.06] py-1 text-center text-[11px] text-slate-300 hover:bg-white/[0.1]"
+          >
+            Clear Measurement
+          </button>
+        </div>
+      )}
 
       {/* Settings Flyout Drawer */}
       {showSettings && (
@@ -644,7 +835,10 @@ export default function PointCloudViewer({
       )}
 
       {/* Main 3D Canvas Mount */}
-      <div ref={mountRef} className="h-full w-full cursor-grab active:cursor-grabbing" />
+      <div
+        ref={mountRef}
+        className={`h-full w-full ${isMeasuring ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
+      />
 
       {/* Loading Overlay */}
       {loading && (
@@ -666,7 +860,11 @@ export default function PointCloudViewer({
       {/* Bottom Status Bar */}
       <div className="absolute bottom-2 left-3 right-3 z-10 flex items-center justify-between rounded-lg bg-black/50 px-3 py-1.5 text-[11px] text-slate-400 backdrop-blur-sm pointer-events-none">
         <div className="flex items-center gap-3">
-          <span>Drag to rotate · Right-click/Shift+drag to pan · Scroll to zoom</span>
+          <span>
+            {isMeasuring
+              ? 'Click two points in scene to measure distance'
+              : 'Drag to rotate · Right-click/Shift+drag to pan · Scroll to zoom'}
+          </span>
           {pointCount > 0 && viewMode !== 'mesh' && (
             <span className="font-mono text-cyan-300">{pointCount.toLocaleString()} points</span>
           )}
