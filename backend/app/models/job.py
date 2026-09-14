@@ -13,7 +13,7 @@ logger = logging.getLogger("aerorecon.job")
 
 # JSON-serialised columns that need parsing on read
 _JSON_FIELDS = frozenset(
-    {"video_metadata", "stage_progress", "artifacts", "errors", "confidence_summary"}
+    {"video_metadata", "stage_progress", "artifacts", "errors", "confidence_summary", "reconstruction_stats"}
 )
 
 

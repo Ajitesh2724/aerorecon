@@ -93,6 +93,7 @@ class JobResponse(BaseModel):
     errors: List[str] = Field(default_factory=list)
     processing_duration_s: Optional[float] = None
     confidence_summary: Dict[str, Any] = Field(default_factory=dict)
+    reconstruction_stats: Dict[str, Any] = Field(default_factory=dict)
     georef_status: str = "unavailable"
 
 

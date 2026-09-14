@@ -167,6 +167,8 @@ async def _execute_stage(
     """
     if stage_name == "preprocessing":
         return await _run_preprocessing(job_id, job, job_dir)
+    if stage_name == "sfm":
+        return await _run_sfm(job_id, job, job_dir)
     # Stages added in later milestones return None (skipped)
     return None
 
@@ -176,9 +178,9 @@ async def _execute_stage(
 
 async def _run_preprocessing(job_id: str, job: dict, job_dir: Path) -> StageResult:
     """Stage 1: Validate video, extract frames, select keyframes."""
-    from .preprocessing import validate_video, extract_all_frames, generate_thumbnail
-    from .keyframes import select_keyframes, summarise_keyframes
-    from .metadata import parse_telemetry, parse_camera_intrinsics, telemetry_summary
+    from ..services.preprocessing import validate_video, extract_all_frames, generate_thumbnail
+    from ..services.keyframes import select_keyframes, summarise_keyframes
+    from ..services.metadata import parse_telemetry, parse_camera_intrinsics, telemetry_summary
 
     video_path = job.get("video_path")
     if not video_path or not Path(video_path).exists():
@@ -266,6 +268,140 @@ async def _run_preprocessing(job_id: str, job: dict, job_dir: Path) -> StageResu
         f"{info.duration_s:.1f}s duration"
     )
     return StageResult(True, msg, artifacts)
+
+
+async def _run_sfm(job_id: str, job: dict, job_dir: Path) -> StageResult:
+    """Stage 2: Structure-from-Motion (COLMAP with OpenCV fallback)."""
+    import json as _json
+    import asyncio
+    from ..services.sfm import get_colmap_path, run_colmap_sfm, run_opencv_sfm
+
+    # Progress helper
+    async def _update_progress(pct: float, msg: str = "") -> None:
+        await JobCRUD.update(
+            job_id,
+            stage_progress={
+                **((await JobCRUD.get(job_id)) or {}).get("stage_progress", {}),
+                "sfm": {"status": "running", "progress": pct, "message": msg},
+            },
+        )
+        await _broadcast(job_id, "sfm", "running", pct)
+
+    await _update_progress(5, "Preparing keyframe images for SfM…")
+
+    # Locate keyframe images or extracted frames
+    kf_json_path = job_dir / "keyframes.json"
+    sfm_img_dir = job_dir / "sfm_images"
+    sfm_img_dir.mkdir(parents=True, exist_ok=True)
+
+    image_paths = []
+    if kf_json_path.exists():
+        try:
+            kfs = _json.loads(kf_json_path.read_text())
+            for kf in kfs:
+                p = kf.get("path")
+                if p and Path(p).exists():
+                    image_paths.append(Path(p))
+        except Exception as exc:
+            logger.warning("Could not read keyframes.json: %s", exc)
+
+    if not image_paths:
+        frames_dir = job_dir / "frames"
+        if frames_dir.exists():
+            image_paths = sorted(
+                [f for f in frames_dir.iterdir() if f.suffix.lower() in (".jpg", ".jpeg", ".png")]
+            )
+
+    if len(image_paths) < 2:
+        return StageResult(False, f"Not enough frames for SfM ({len(image_paths)} found).")
+
+    # Copy keyframes into sfm_images directory if not already there
+    for src in image_paths:
+        dst = sfm_img_dir / src.name
+        if not dst.exists():
+            try:
+                import shutil
+                shutil.copy2(src, dst)
+            except Exception:
+                pass
+
+    # Retrieve camera intrinsics if available
+    cam_intrinsics = None
+    vmeta = job.get("video_metadata") or {}
+    if isinstance(vmeta, dict):
+        cam_intrinsics = vmeta.get("camera_intrinsics")
+    if not cam_intrinsics and job.get("camera_intrinsics"):
+        from ..services.metadata import parse_camera_intrinsics
+        cam_intrinsics = parse_camera_intrinsics(job["camera_intrinsics"])
+
+    sfm_ws = job_dir / "sfm"
+    sfm_ws.mkdir(parents=True, exist_ok=True)
+
+    loop = asyncio.get_running_loop()
+
+    def sync_progress(pct: float, msg: str) -> None:
+        asyncio.run_coroutine_threadsafe(_update_progress(pct, msg), loop)
+
+    use_colmap = get_colmap_path() is not None
+    sfm_result = None
+
+    if use_colmap:
+        try:
+            logger.info("Executing COLMAP SfM for job %s", job_id)
+            sfm_result = await loop.run_in_executor(
+                None,
+                lambda: run_colmap_sfm(
+                    str(sfm_img_dir),
+                    str(sfm_ws),
+                    camera_intrinsics=cam_intrinsics,
+                    on_progress=sync_progress,
+                ),
+            )
+        except Exception as exc:
+            logger.warning("COLMAP failed (%s). Falling back to OpenCV SfM.", exc)
+            sfm_result = None
+
+    if not sfm_result:
+        logger.info("Executing OpenCV SfM fallback for job %s", job_id)
+        await _update_progress(15, "Running OpenCV feature matching & SfM fallback…")
+        try:
+            sfm_result = await loop.run_in_executor(
+                None,
+                lambda: run_opencv_sfm(
+                    str(sfm_img_dir),
+                    str(sfm_ws),
+                    camera_intrinsics=cam_intrinsics,
+                    on_progress=sync_progress,
+                ),
+            )
+        except Exception as exc:
+            return StageResult(False, f"SfM reconstruction failed: {str(exc)}")
+
+    await _update_progress(100, "SfM complete.")
+
+    artifacts = {
+        "sparse_ply": sfm_result["sparse_ply"],
+        "poses_json": sfm_result["poses_json"],
+    }
+    stats = sfm_result.get("stats", {})
+
+    # Update job with reconstruction stats
+    await JobCRUD.update(
+        job_id,
+        reconstruction_stats={
+            **((await JobCRUD.get(job_id)) or {}).get("reconstruction_stats", {}),
+            "sfm": stats,
+            "sparse_points": stats.get("sparse_points", 0),
+            "registered_images": stats.get("registered_images", sfm_result.get("n_poses", 0)),
+        },
+    )
+
+    summary_msg = (
+        f"SfM recovered {stats.get('sparse_points', 0)} points from "
+        f"{stats.get('registered_images', sfm_result.get('n_poses', 0))} views "
+        f"(method: {stats.get('method', 'colmap')})"
+    )
+    return StageResult(True, summary_msg, artifacts)
 
 
 # ── Helpers ───────────────────────────────────────────────────────

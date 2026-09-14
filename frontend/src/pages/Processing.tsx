@@ -16,8 +16,9 @@ import {
   Download,
   Eye,
 } from 'lucide-react';
-import { api, connectWebSocket } from '../services/api';
-import type { Job, WSMessage } from '../types/job';
+import { api, connectWebSocket, type WSMessage } from '../services/api';
+import type { Job } from '../types/job';
+import PointCloudViewer from '../components/PointCloudViewer';
 
 /* ── Pipeline stage definitions ────────────────────────────────── */
 
@@ -235,6 +236,52 @@ export default function Processing() {
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {/* 3D Reconstruction Viewer */}
+      {job.artifacts?.sparse_ply && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-400">
+              3D Reconstruction (Sparse Point Cloud & Camera Poses)
+            </h3>
+            {Boolean(job.reconstruction_stats?.sfm) && (
+              <span className="rounded-md bg-cyan-500/10 px-2.5 py-1 text-xs font-mono text-cyan-300">
+                Method: {String((job.reconstruction_stats?.sfm as Record<string, unknown>)?.method || 'COLMAP')}
+              </span>
+            )}
+          </div>
+
+          {/* Quick Metrics Bar */}
+          <div className="grid grid-cols-3 gap-3">
+            <div className="glass-card p-4">
+              <p className="text-xs text-slate-500">Sparse 3D Points</p>
+              <p className="text-xl font-bold text-slate-100 mt-1">
+                {Number(job.reconstruction_stats?.sparse_points || 0).toLocaleString()}
+              </p>
+            </div>
+            <div className="glass-card p-4">
+              <p className="text-xs text-slate-500">Registered Views</p>
+              <p className="text-xl font-bold text-cyan-400 mt-1">
+                {Number(job.reconstruction_stats?.registered_images || 0)}
+              </p>
+            </div>
+            <div className="glass-card p-4">
+              <p className="text-xs text-slate-500">Reprojection Error</p>
+              <p className="text-xl font-bold text-emerald-400 mt-1">
+                {(job.reconstruction_stats?.sfm as Record<string, unknown> | undefined)?.mean_reprojection_error != null
+                  ? `${String((job.reconstruction_stats?.sfm as Record<string, unknown>).mean_reprojection_error)} px`
+                  : 'N/A'}
+              </p>
+            </div>
+          </div>
+
+          <PointCloudViewer
+            plyUrl={api.artifactUrl(job.id, 'sparse_ply')}
+            posesUrl={job.artifacts.poses_json ? api.artifactUrl(job.id, 'poses_json') : undefined}
+            title={`${job.name} — Sparse Geometry & Camera Trajectory`}
+          />
         </div>
       )}
 
