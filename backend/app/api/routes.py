@@ -167,19 +167,11 @@ async def delete_job(job_id: str):
 
 
 async def _run_pipeline(job_id: str) -> None:
-    """Background pipeline execution.
+    """Background pipeline execution — delegates to the pipeline orchestrator."""
+    from ..workers.pipeline import run_pipeline
 
-    In Milestone 1 this is a placeholder.  Real stage implementations
-    (preprocessing, SfM, depth, etc.) are added in later milestones.
-    """
     try:
-        await JobCRUD.update(job_id, status="processing", current_stage="preprocessing")
-        await JobCRUD.append_log(job_id, "Pipeline started — awaiting stage implementations.")
-        await manager.broadcast_job_update(job_id, {"status": "processing", "stage": "preprocessing"})
-
-        # TODO: Milestone 2+ — wire actual pipeline stages here.
-        # For now, leave the job in "processing" so the frontend can display it.
-
+        await run_pipeline(job_id)
     except Exception as exc:
         logger.exception("Pipeline failed for job %s", job_id)
         await JobCRUD.update(job_id, status="failed")

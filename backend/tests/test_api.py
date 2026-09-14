@@ -7,20 +7,32 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
-from app.models.database import init_db, close_db
+from app.models import database as db_module
+from app.models.database import init_db, close_db, CREATE_JOBS_TABLE
+from app.config import settings
+
+import aiosqlite
 
 
 @pytest.fixture(autouse=True)
-async def setup_teardown():
-    """Initialize and tear down the database for each test."""
-    await init_db()
-    yield
+async def fresh_db(tmp_path):
+    """Use a temporary database for each test so tests are fully isolated."""
+    test_db_path = tmp_path / "test.db"
+    # Monkey-patch settings to use temp path
+    original_db = settings.DB_PATH
+    object.__setattr__(settings, '_db_path_override', test_db_path)
+
+    # Close any prior connection and open a fresh one
     await close_db()
+    db_module._db = await aiosqlite.connect(str(test_db_path))
+    db_module._db.row_factory = aiosqlite.Row
+    await db_module._db.execute(CREATE_JOBS_TABLE)
+    await db_module._db.commit()
 
+    yield
 
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
+    await close_db()
+    object.__setattr__(settings, '_db_path_override', None)
 
 
 @pytest.mark.anyio
