@@ -175,6 +175,8 @@ async def _execute_stage(
         return await _run_depth(job_id, job, job_dir)
     if stage_name == "optical_flow":
         return await _run_optical_flow(job_id, job, job_dir)
+    if stage_name == "dense_reconstruction":
+        return await _run_dense_reconstruction(job_id, job, job_dir)
     # Stages added in later milestones return None (skipped)
     return None
 
@@ -570,6 +572,149 @@ async def _run_optical_flow(job_id: str, job: dict, job_dir: Path) -> StageResul
         f"Computed {stats.get('total_pairs', 0)} flow fields "
         f"(mean velocity: {stats.get('mean_flow_velocity_px', 0.0)} px/frame, "
         f"consistency: {round(stats.get('mean_consistency_rate', 0.0) * 100, 1)}%)"
+    )
+    return StageResult(True, msg, artifacts)
+
+
+async def _run_dense_reconstruction(job_id: str, job: dict, job_dir: Path) -> StageResult:
+    """Stage 6: Dense 3D Point Cloud, Gaussian Splats, and Surface Mesh."""
+    import asyncio
+    from ..services.dense_reconstruction import run_dense_reconstruction
+    from ..services.gaussian_splatting import export_gaussian_splats
+    from ..services.mesh import generate_surface_mesh
+
+    async def _update_progress(pct: float, msg: str = "") -> None:
+        await JobCRUD.update(
+            job_id,
+            stage_progress={
+                **((await JobCRUD.get(job_id)) or {}).get("stage_progress", {}),
+                "dense_reconstruction": {"status": "running", "progress": pct, "message": msg},
+            },
+        )
+        await _broadcast(job_id, "dense_reconstruction", "running", pct)
+
+    # Locate poses JSON
+    poses_json = job_dir / "sfm" / "camera_poses.json"
+    if not poses_json.exists():
+        poses_json = job_dir / "camera_poses.json"
+    if not poses_json.exists():
+        return StageResult(False, "Camera poses not found. SfM stage must succeed first.")
+
+    depth_dir = job_dir / "depth" / "raw"
+    if not depth_dir.exists():
+        return StageResult(False, "Depth maps not found. Depth stage must succeed first.")
+
+    image_dir = job_dir / "sfm_images"
+    if not image_dir.exists():
+        image_dir = job_dir / "frames"
+
+    masks_dir = job_dir / "masking" / "masks"
+
+    # Intrinsics
+    cam_intrinsics = None
+    vmeta = job.get("video_metadata") or {}
+    if isinstance(vmeta, dict):
+        cam_intrinsics = vmeta.get("camera_intrinsics")
+
+    await _update_progress(5, "Fusing multi-view depth and back-projecting points…")
+
+    dense_out = job_dir / "dense" / "dense.ply"
+    dense_out.parent.mkdir(parents=True, exist_ok=True)
+
+    loop = asyncio.get_running_loop()
+    def sync_progress(pct: float, msg: str) -> None:
+        asyncio.run_coroutine_threadsafe(_update_progress(pct * 0.5, msg), loop)
+
+    dense_res = await loop.run_in_executor(
+        None,
+        lambda: run_dense_reconstruction(
+            poses_json_path=str(poses_json),
+            depth_dir=str(depth_dir),
+            image_dir=str(image_dir),
+            output_ply_path=str(dense_out),
+            masks_dir=str(masks_dir) if masks_dir.exists() else None,
+            camera_intrinsics=cam_intrinsics,
+            on_progress=sync_progress,
+        ),
+    )
+
+    artifacts = {
+        "dense_ply": dense_res["dense_ply"],
+    }
+    stats = dense_res.get("stats", {})
+
+    # Helper to parse points and colors from ASCII PLY for splats and mesh
+    def _parse_ply_data(ply_path: Path):
+        pts, cols = [], []
+        with open(ply_path, "r") as f:
+            in_header = True
+            for line in f:
+                if in_header:
+                    if line.strip() == "end_header":
+                        in_header = False
+                    continue
+                parts = line.strip().split()
+                if len(parts) >= 6:
+                    pts.append([float(parts[0]), float(parts[1]), float(parts[2])])
+                    cols.append([int(parts[3]), int(parts[4]), int(parts[5])])
+                elif len(parts) >= 3:
+                    pts.append([float(parts[0]), float(parts[1]), float(parts[2])])
+                    cols.append([180, 180, 180])
+        if not pts:
+            return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.uint8)
+        return np.array(pts, dtype=np.float32), np.array(cols, dtype=np.uint8)
+
+    pts, cols = await loop.run_in_executor(None, lambda: _parse_ply_data(dense_out))
+
+    # Generate 3D Gaussian Splats
+    if len(pts) > 0:
+        await _update_progress(55, "Generating 3D Gaussian Splatting representation…")
+        splat_out = job_dir / "splat" / "gaussian_splat.ply"
+        def splat_prog(pct: float, msg: str) -> None:
+            asyncio.run_coroutine_threadsafe(_update_progress(50 + pct * 0.2, msg), loop)
+
+        splat_res = await loop.run_in_executor(
+            None,
+            lambda: export_gaussian_splats(
+                pts, cols, str(splat_out), on_progress=splat_prog
+            ),
+        )
+        artifacts["gaussian_splat"] = splat_res["splat_ply"]
+        stats["num_gaussians"] = splat_res["stats"].get("num_gaussians", 0)
+
+    # Generate Surface Mesh
+    if len(pts) >= 3:
+        await _update_progress(75, "Generating continuous 3D surface mesh…")
+        mesh_out = job_dir / "mesh" / "model.obj"
+        def mesh_prog(pct: float, msg: str) -> None:
+            asyncio.run_coroutine_threadsafe(_update_progress(70 + pct * 0.25, msg), loop)
+
+        mesh_res = await loop.run_in_executor(
+            None,
+            lambda: generate_surface_mesh(
+                pts, cols, str(mesh_out), on_progress=mesh_prog
+            ),
+        )
+        artifacts["mesh_obj"] = mesh_res["mesh_obj"]
+        stats["face_count"] = mesh_res["stats"].get("face_count", 0)
+
+    await _update_progress(100, "Dense 3D reconstruction complete.")
+
+    # Update job with reconstruction stats
+    await JobCRUD.update(
+        job_id,
+        reconstruction_stats={
+            **((await JobCRUD.get(job_id)) or {}).get("reconstruction_stats", {}),
+            "dense_points": stats.get("dense_points_count", 0),
+            "num_gaussians": stats.get("num_gaussians", 0),
+            "face_count": stats.get("face_count", 0),
+        },
+    )
+
+    msg = (
+        f"Generated {stats.get('dense_points_count', 0):,} dense 3D points, "
+        f"{stats.get('num_gaussians', 0):,} Gaussian splats, "
+        f"and {stats.get('face_count', 0):,} mesh triangles"
     )
     return StageResult(True, msg, artifacts)
 
