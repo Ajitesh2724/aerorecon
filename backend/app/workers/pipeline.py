@@ -167,8 +167,14 @@ async def _execute_stage(
     """
     if stage_name == "preprocessing":
         return await _run_preprocessing(job_id, job, job_dir)
+    if stage_name == "masking":
+        return await _run_masking(job_id, job, job_dir)
     if stage_name == "sfm":
         return await _run_sfm(job_id, job, job_dir)
+    if stage_name == "depth":
+        return await _run_depth(job_id, job, job_dir)
+    if stage_name == "optical_flow":
+        return await _run_optical_flow(job_id, job, job_dir)
     # Stages added in later milestones return None (skipped)
     return None
 
@@ -402,6 +408,170 @@ async def _run_sfm(job_id: str, job: dict, job_dir: Path) -> StageResult:
         f"(method: {stats.get('method', 'colmap')})"
     )
     return StageResult(True, summary_msg, artifacts)
+
+
+def _get_job_image_paths(job_dir: Path) -> list[str]:
+    """Retrieve keyframe images or fallback to all extracted frames."""
+    import json as _json
+    kf_json_path = job_dir / "keyframes.json"
+    paths: list[str] = []
+    if kf_json_path.exists():
+        try:
+            kfs = _json.loads(kf_json_path.read_text())
+            for kf in kfs:
+                p = kf.get("path")
+                if p and Path(p).exists():
+                    paths.append(str(Path(p)))
+        except Exception as exc:
+            logger.warning("Could not read keyframes.json: %s", exc)
+
+    if not paths:
+        frames_dir = job_dir / "frames"
+        if frames_dir.exists():
+            paths = sorted(
+                [str(f) for f in frames_dir.iterdir() if f.suffix.lower() in (".jpg", ".jpeg", ".png")]
+            )
+    return paths
+
+
+async def _run_masking(job_id: str, job: dict, job_dir: Path) -> StageResult:
+    """Stage 2: Dynamic object masking."""
+    import asyncio
+    from ..services.masking import generate_dynamic_masks
+
+    async def _update_progress(pct: float, msg: str = "") -> None:
+        await JobCRUD.update(
+            job_id,
+            stage_progress={
+                **((await JobCRUD.get(job_id)) or {}).get("stage_progress", {}),
+                "masking": {"status": "running", "progress": pct, "message": msg},
+            },
+        )
+        await _broadcast(job_id, "masking", "running", pct)
+
+    image_paths = _get_job_image_paths(job_dir)
+    if not image_paths:
+        return StageResult(False, "No frames available for dynamic masking.")
+
+    await _update_progress(5, "Analyzing dynamic objects & transients…")
+
+    loop = asyncio.get_running_loop()
+    def sync_progress(pct: float, msg: str) -> None:
+        asyncio.run_coroutine_threadsafe(_update_progress(pct, msg), loop)
+
+    mask_res = await loop.run_in_executor(
+        None,
+        lambda: generate_dynamic_masks(
+            image_paths,
+            str(job_dir / "masking"),
+            on_progress=sync_progress,
+        ),
+    )
+
+    await _update_progress(100, "Masking complete.")
+    stats = mask_res.get("stats", {})
+    artifacts = {
+        "masks_manifest": mask_res["manifest_path"],
+    }
+    msg = (
+        f"Analyzed {stats.get('total_frames', 0)} frames. "
+        f"{stats.get('frames_with_dynamic_objects', 0)} dynamic objects isolated "
+        f"(method: {stats.get('method', 'motion_compensation')})"
+    )
+    return StageResult(True, msg, artifacts)
+
+
+async def _run_depth(job_id: str, job: dict, job_dir: Path) -> StageResult:
+    """Stage 4: Monocular Depth Estimation."""
+    import asyncio
+    from ..services.depth import estimate_depth_maps
+
+    async def _update_progress(pct: float, msg: str = "") -> None:
+        await JobCRUD.update(
+            job_id,
+            stage_progress={
+                **((await JobCRUD.get(job_id)) or {}).get("stage_progress", {}),
+                "depth": {"status": "running", "progress": pct, "message": msg},
+            },
+        )
+        await _broadcast(job_id, "depth", "running", pct)
+
+    image_paths = _get_job_image_paths(job_dir)
+    if not image_paths:
+        return StageResult(False, "No frames available for depth estimation.")
+
+    await _update_progress(5, "Initializing depth estimation engine…")
+
+    loop = asyncio.get_running_loop()
+    def sync_progress(pct: float, msg: str) -> None:
+        asyncio.run_coroutine_threadsafe(_update_progress(pct, msg), loop)
+
+    depth_res = await loop.run_in_executor(
+        None,
+        lambda: estimate_depth_maps(
+            image_paths,
+            str(job_dir / "depth"),
+            on_progress=sync_progress,
+        ),
+    )
+
+    await _update_progress(100, "Depth estimation complete.")
+    stats = depth_res.get("stats", {})
+    artifacts = {
+        "depth_manifest": depth_res["manifest_path"],
+    }
+    msg = (
+        f"Generated {stats.get('total_depth_maps', 0)} dense depth maps "
+        f"(mean depth: {stats.get('mean_scene_depth', 0.0)}m, method: {stats.get('method', 'unknown')})"
+    )
+    return StageResult(True, msg, artifacts)
+
+
+async def _run_optical_flow(job_id: str, job: dict, job_dir: Path) -> StageResult:
+    """Stage 5: Continuous Optical Flow and Motion Priors."""
+    import asyncio
+    from ..services.optical_flow import compute_sequence_optical_flow
+
+    async def _update_progress(pct: float, msg: str = "") -> None:
+        await JobCRUD.update(
+            job_id,
+            stage_progress={
+                **((await JobCRUD.get(job_id)) or {}).get("stage_progress", {}),
+                "optical_flow": {"status": "running", "progress": pct, "message": msg},
+            },
+        )
+        await _broadcast(job_id, "optical_flow", "running", pct)
+
+    image_paths = _get_job_image_paths(job_dir)
+    if len(image_paths) < 2:
+        return StageResult(False, f"Not enough frames for optical flow ({len(image_paths)} found).")
+
+    await _update_progress(5, "Estimating forward-backward optical flow fields…")
+
+    loop = asyncio.get_running_loop()
+    def sync_progress(pct: float, msg: str) -> None:
+        asyncio.run_coroutine_threadsafe(_update_progress(pct, msg), loop)
+
+    flow_res = await loop.run_in_executor(
+        None,
+        lambda: compute_sequence_optical_flow(
+            image_paths,
+            str(job_dir / "flow"),
+            on_progress=sync_progress,
+        ),
+    )
+
+    await _update_progress(100, "Optical flow complete.")
+    stats = flow_res.get("stats", {})
+    artifacts = {
+        "flow_manifest": flow_res["manifest_path"],
+    }
+    msg = (
+        f"Computed {stats.get('total_pairs', 0)} flow fields "
+        f"(mean velocity: {stats.get('mean_flow_velocity_px', 0.0)} px/frame, "
+        f"consistency: {round(stats.get('mean_consistency_rate', 0.0) * 100, 1)}%)"
+    )
+    return StageResult(True, msg, artifacts)
 
 
 # ── Helpers ───────────────────────────────────────────────────────
