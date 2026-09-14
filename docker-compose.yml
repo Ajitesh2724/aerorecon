@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  aerorecon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aerorecon:latest
+    container_name: aerorecon-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - CORS_ORIGINS=http://localhost:5173,http://localhost:8000,http://127.0.0.1:5173
+      - LOG_LEVEL=info
+      - DATA_DIR=/app/data
+    volumes:
+      - aerorecon-data:/app/data
+
+volumes:
+  aerorecon-data:
+    driver: local

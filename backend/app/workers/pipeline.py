@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
+
+import numpy as np
 
 from ..config import settings
 from ..models.job import JobCRUD
@@ -686,6 +690,7 @@ async def _run_dense_reconstruction(job_id: str, job: dict, job_dir: Path) -> St
             ),
         )
         artifacts["gaussian_splat"] = splat_res["splat_ply"]
+        artifacts["gaussian_splats"] = splat_res["splat_ply"]
         stats["num_gaussians"] = splat_res["stats"].get("num_gaussians", 0)
 
     # Generate Surface Mesh
@@ -782,6 +787,7 @@ async def _run_georeferencing(job_id: str, job: dict, job_dir: Path) -> StageRes
         artifacts["georeferenced_poses"] = georef_res["aligned_poses_json"]
     if georef_res.get("geojson_path"):
         artifacts["flight_path_geojson"] = georef_res["geojson_path"]
+        artifacts["flight_path"] = georef_res["geojson_path"]
 
     await _update_progress(100, "Georeferencing complete.")
 

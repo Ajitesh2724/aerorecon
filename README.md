@@ -17,45 +17,56 @@ Convert a continuous single-pass drone video into a metrically meaningful 3D rec
 
 ## Motivation
 
-Current 3D reconstruction workflows typically require multi-pass planned flights, heavy manual intervention, and expensive photogrammetry software. AeroRecon aims to make 3D reconstruction accessible from a single drone flight pass, combining classical Structure-from-Motion with modern AI depth estimation for improved coverage in challenging conditions.
+Current 3D reconstruction workflows typically require multi-pass planned flights, heavy manual intervention, and expensive photogrammetry software. AeroRecon converts a single continuous drone flight pass into a metrically meaningful, dense 3D model combining classical Structure-from-Motion, learned depth and optical-flow priors, 3D Gaussian Splatting, and georeferenced metric scaling.
 
 ## Solution Overview
 
-AeroRecon implements a 7-stage modular pipeline:
+AeroRecon implements an end-to-end 9-stage modular pipeline:
 
 | Stage | Method | Purpose |
 |-------|--------|---------|
-| 1. Preprocessing | OpenCV / FFmpeg | Keyframe selection, blur/motion scoring |
-| 2. Dynamic Masking | YOLOv8n-seg | Remove moving objects from reconstruction |
-| 3. Structure from Motion | COLMAP | Camera poses, sparse point cloud |
-| 4. Monocular Depth | Depth Anything V2 | Dense depth priors per keyframe |
-| 5. Optical Flow | RAFT | Inter-frame motion consistency |
-| 6. Dense Reconstruction | Depth back-projection + Gaussian Splatting | Dense 3D model |
-| 7. Post-processing | pyproj, confidence scoring | Georeferencing, quality assessment |
+| **1. Preprocessing** | OpenCV / FFmpeg | Video validation, Laplacian blur/motion scoring, keyframe extraction, thumbnail generation |
+| **2. Dynamic Masking** | YOLOv8 / Frame Differencing | Motion-compensated segmentation to mask moving vehicles, people, and transient artifacts |
+| **3. SfM Baseline** | COLMAP / OpenCV SIFT fallback | Feature matching, 6-DoF camera pose estimation, sparse point cloud generation |
+| **4. Monocular Depth** | PyTorch MiDaS / Multi-scale Laplacian | Relative depth map prediction per keyframe with edge-preserving filtering |
+| **5. Optical Flow** | DISOpticalFlow / Forward-Backward Check | Sub-pixel motion tracking and cross-frame geometric consistency verification |
+| **6. Dense 3D & Splatting** | Multi-view Back-projection + 3DGS + Mesh | Dense point cloud fusion, official binary 3D Gaussian Splatting PLY, continuous Delaunay surface OBJ |
+| **7. Georeferencing** | 7-DoF Sim(3) Umeyama Alignment | Correlate camera trajectory with WGS84 GPS telemetry, ENU plane projection, metric scale factor |
+| **8. Confidence Mapping** | Multi-factor Uncertainty Model | Heuristic quality evaluation: view redundancy, reprojection precision, motion consistency (4 tiers) |
+| **9. Package Export** | Automated Deliverable Archiving | Standalone ZIP packaging with all PLY point clouds, 3DGS models, OBJ meshes, GeoJSON flight paths, and audit reports |
 
 ### Key Differentiators
 
-- **Hybrid reconstruction**: Classical SfM + learned depth priors for improved density
-- **Single-pass operation**: No multi-flight planning required
-- **Transparent confidence**: Per-point quality scoring, never fabricated
-- **Hardware-aware**: Adapts to available GPU, degrades gracefully
-- **Modular design**: Each pipeline stage is independently testable
+- **Hybrid Reconstruction**: Classical SfM baseline fused with learned depth priors for uniform density across low-texture regions.
+- **Interactive 3D Measurements**: Raycasted Euclidean distance and elevation delta calculation directly inside the browser with metric (meters) and imperial (feet) conversions.
+- **Single-Pass Aerial Operation**: Operates on linear, continuous drone video passes without requiring cross-grid flights.
+- **Transparent Confidence**: Multi-factor scoring (High / Medium / Low / Unseen) with per-factor weighting and visual audit breakdown.
+- **Graceful Hardware Fallback**: Runs on budget GPUs (GTX 1650 4GB) and CPU-only environments with native OpenCV/SciPy fallbacks.
 
 ## Architecture
 
 ```
-┌─────────────────┐     REST + WebSocket     ┌──────────────────┐
-│    React UI      │ ◄─────────────────────► │   FastAPI         │
-│  Three.js 3D     │                          │   Pipeline        │
-│  Tailwind CSS    │                          │   SQLite          │
-└─────────────────┘                          └──────┬───────────┘
-                                                     │
-                    ┌────────────────────────────────┤
-                    ▼              ▼           ▼     ▼
-              ┌──────────┐  ┌──────────┐  ┌──────┐ ┌──────────┐
-              │ COLMAP   │  │ Depth    │  │ RAFT │ │ Gaussian │
-              │ SfM      │  │ Anything │  │      │ │ Splatting│
-              └──────────┘  └──────────┘  └──────┘ └──────────┘
+┌────────────────────────────────────────────────────────┐
+│             React 19 + Three.js Client                 │
+│  - Multi-mode 3D Viewer (Sparse, Dense, Mesh)         │
+│  - 3D Distance & Elevation Measurement Raycaster       │
+│  - Confidence Distribution & Factor Audit Breakdown     │
+│  - Real-time Stage Progress & WebSocket Telemetry      │
+└───────────────────────────▲────────────────────────────┘
+                            │ REST + WebSocket
+┌───────────────────────────▼────────────────────────────┐
+│                    FastAPI Backend                     │
+│  - Async SQLite Job Store (JobCRUD)                    │
+│  - Multi-stage Worker Orchestrator (9 Stages)          │
+│  - Artifact Streaming & ZIP Packaging                  │
+└───────────────────────────┬────────────────────────────┘
+                            │
+      ┌─────────────────────┼─────────────────────┐
+      ▼                     ▼                     ▼
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│ SfM / COLMAP │     │ Learned Depth│     │ 3D Gaussians │
+│ + SIFT Fallb.│     │ + DIS Flow   │     │ & Mesh Gen   │
+└──────────────┘     └──────────────┘     └──────────────┘
 ```
 
 ## Installation
@@ -100,19 +111,44 @@ Download the pre-built binary from [COLMAP releases](https://github.com/colmap/c
 
 ### Running the Application
 
-**Backend** (from project root):
+**Option A: Local Development**
+
+1. **Backend** (from project root):
+   ```bash
+   cd backend
+   uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+   ```
+
+2. **Frontend** (separate terminal):
+   ```bash
+   cd frontend
+   npm run dev
+   ```
+   Open **http://localhost:5173** in your browser.
+
+**Option B: Docker Compose**
+
+```bash
+docker compose up --build
+```
+Open **http://localhost:8000** for the containerized application.
+
+### Demo Dataset Generation
+
+Generate synthetic drone video footage and telemetry for immediate demonstration and testing:
+```bash
+python backend/scripts/generate_demo_dataset.py
+```
+This produces:
+- `data/demo/demo_flight.mp4`: Synthetic aerial footage with textured structures.
+- `data/demo/demo_telemetry.json` & `demo_telemetry.csv`: Synchronized GPS & IMU telemetry.
+
+### Running Automated Verification Tests
+
 ```bash
 cd backend
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+python -m pytest -q tests/test_api.py tests/test_processing.py tests/test_sfm.py tests/test_learned_priors.py tests/test_dense_reconstruction.py tests/test_operational.py tests/test_e2e_pipeline.py
 ```
-
-**Frontend** (separate terminal):
-```bash
-cd frontend
-npm run dev
-```
-
-Open **http://localhost:5173** in your browser.
 
 ## API Documentation
 
