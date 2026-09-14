@@ -23,6 +23,10 @@ aiosqlite>=0.20.0
 aiofiles>=23.2.0
 pillow>=10.0.0
 
+# ML / Learned Priors
+torch>=2.0.0
+torchvision>=0.15.0
+
 # Utilities
 python-dotenv>=1.0.0
 
